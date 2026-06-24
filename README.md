@@ -1,49 +1,66 @@
 # QwenCode Bridge Skill
 
-> Claude 动脑，Qwen 动手 — 本地免费执行工作流
+> Claude 动脑，Qwen 动手 — 本地免费执行 + 实时进度可视化
 
-## 是什么
+## 🎯 是什么
 
-这是一个 Claude Code Skill，让 Claude Code 将执行任务委托给本地 Qwen Code（基于 Ollama 的千问模型）。
+这是一个 Claude Code Skill，让 Claude Code 将代码执行任务委托给本地 Qwen Code（基于 Ollama 千问模型），并配有 **实时进度仪表盘**。
 
-**Claude Code** → 大脑：理解需求、拆解任务、写指令  
-**Qwen Code** → 手脚：写代码、创建文件、执行命令  
-**成本**：推理用 DeepSeek API（省 token），执行走本地 Ollama（免费）
+```
+Claude Code  →  qwencode.ps1  →  Qwen Code  →  产出文件
+  (大脑)         (桥接)          (手脚)       
+    ↓
+ dashboard.js → 浏览器实时看进度
+```
 
-## 快速开始
+## 🚀 快速开始
 
 ```powershell
 # 1. 安装依赖
 npm install -g @qwen-code/qwen-code
 ollama pull qwen3:8b-fast
 
-# 2. Clone 本仓库
+# 2. Clone
 git clone https://github.com/jaykayelo/qwencode-skill.git
 
-# 3. 运行
-.\qwencode-skill\qwencode.ps1 "在 D:\test 创建一个 hello world 网页"
+# 3. 启动仪表盘
+.\qwencode-skill\dashboard.ps1
+
+# 4. 开另一个终端，跑任务
+.\qwencode-skill\qwencode.ps1 "创建一个天气预报网页"
 ```
 
-## 效果对比
+打开 **http://localhost:9876** 实时查看进度。
 
-| | 纯 Claude 写代码 | Claude + QwenCode |
-|---|---|---|
-| 输出 token | 2000+ | ~200 |
-| 执行成本 | 按 token 计费 | 本地免费 |
-| 大型任务 | token 线性增长 | token 固定（只花指令） |
+## 📊 仪表盘功能
 
-## 文件结构
+- 🟢 实时进度条 + 6 步阶段指示器
+- 📋 任务历史记录（最近 20 条）
+- ⏱ 执行耗时统计
+- 🔄 每秒自动刷新
+
+## 📁 文件结构
 
 ```
 qwencode-skill/
-├── qwencode.ps1    # 桥接脚本
-├── skill.md         # Claude Code Skill 定义
-└── README.md        # 本文件
+├── qwencode.ps1     # 桥接脚本（状态写入 + 执行）
+├── dashboard.js      # Node.js 仪表盘服务器
+├── dashboard.ps1     # 仪表盘一键启动器
+├── skill.md          # Claude Code Skill 定义
+└── README.md
 ```
 
-## 模型说明
+## 📊 效果对比
 
-| 模型 | 速度 | 适用 |
-|------|------|------|
-| `qwen3:8b-fast` | ⚡ 快 | 日常代码生成 |
-| `qwen3:8b` | 🐢 慢（带推理链） | 复杂逻辑 |
+| | 纯 Claude | Claude + QwenCode |
+|---|---|---|
+| 输出 token | 2000+ | ~200 |
+| 执行成本 | 按 token 计费 | 本地免费 |
+| 进度可见 | ❌ | ✅ 仪表盘 |
+
+## 🔧 模型
+
+| 模型 | 说明 |
+|------|------|
+| `qwen3:8b-fast` | ⚡ 无推理链，快速执行（推荐） |
+| `qwen3:8b` | 🐢 带推理链，质量更高 |
