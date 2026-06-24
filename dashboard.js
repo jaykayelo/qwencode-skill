@@ -31,7 +31,68 @@ function getOllamaStatus() {
         const models = execSync('ollama list', { encoding: 'utf8', timeout: 5000 });
         const ps = execSync('ollama ps', { encoding: 'utf8', timeout: 5000 });
         return { models: models.trim(), running: ps.trim() };
-    } catch { return { models: '离线', running: '离线' }; }
+    } catch { return { models: 'offline', running: 'offline' }; }
+}
+
+function parseOllamaPs(raw) {
+    // Parse "ollama ps" output: NAME  ID  SIZE  PROCESSOR  CONTEXT  UNTIL
+    const lines = raw.trim().split('\n');
+    if (lines.length < 2) return [];
+    const models = [];
+    for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].trim().split(/\s{2,}/);
+        if (parts.length >= 4) {
+            const proc = parts[3] || '';
+            const cpuMatch = proc.match(/(\d+)%/);
+            const gpuMatch = proc.match(/(\d+)%/g);
+            models.push({
+                name: parts[0],
+                id: parts[1] ? parts[1].substring(0, 12) : '',
+                size: parts[2] || '',
+                processor: proc,
+                cpuPercent: cpuMatch ? parseInt(cpuMatch[1]) : 0,
+                gpuPercent: gpuMatch && gpuMatch[1] ? parseInt(gpuMatch[1]) : 0,
+                context: parts[4] || '',
+                until: parts[5] || ''
+            });
+        }
+    }
+    return models;
+}
+
+function getResources() {
+    const result = { timestamp: new Date().toISOString(), models: [], system: {} };
+    try {
+        // Ollama models
+        const raw = execSync('ollama ps', { encoding: 'utf8', timeout: 5000 });
+        result.models = parseOllamaPs(raw);
+
+        // System memory via PowerShell
+        const memRaw = execSync(
+            'powershell -NoProfile -Command "$os=Get-CimInstance Win32_OperatingSystem; $total=[math]::Round($os.TotalVisibleMemorySize/1MB,1); $free=[math]::Round($os.FreePhysicalMemory/1MB,1); $used=$total-$free; $pct=[math]::Round($used/$total*100,1); Write-Host \\"$total|$used|$free|$pct\\""',
+            { encoding: 'utf8', timeout: 5000 }
+        ).trim();
+        const memParts = memRaw.split('|');
+        if (memParts.length === 4) {
+            result.system = {
+                ramTotal: parseFloat(memParts[0]),
+                ramUsed: parseFloat(memParts[1]),
+                ramFree: parseFloat(memParts[2]),
+                ramPercent: parseFloat(memParts[3])
+            };
+        }
+
+        // CPU usage
+        const cpuRaw = execSync(
+            'powershell -NoProfile -Command "$cpu=(Get-CimInstance Win32_Processor | Select-Object -First 1).LoadPercentage; Write-Host $cpu"',
+            { encoding: 'utf8', timeout: 5000 }
+        ).trim();
+        result.system.cpuPercent = parseInt(cpuRaw) || 0;
+
+    } catch (e) {
+        result.error = e.message;
+    }
+    return result;
 }
 
 // ── 路由 ──────────────────────────────────────
@@ -55,6 +116,12 @@ const server = http.createServer((req, res) => {
     if (req.url === '/api/ollama') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify(getOllamaStatus()));
+    }
+
+    // API: 系统资源 + 模型占用
+    if (req.url === '/api/resources') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify(getResources()));
     }
 
     // 仪表盘页面
@@ -172,6 +239,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .step.done { background: #1a3a1a; color: var(--green); }
   .step.failed { background: #3a1a1a; color: var(--red); }
 
+  /* 资源监控 */
+  .resource-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .res-card { background: var(--card); border:1px solid var(--border); border-radius:10px; padding:14px; }
+  .res-label { font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:6px; }
+  .res-bar-bg { width:100%; height:6px; background:var(--border); border-radius:3px; overflow:hidden; margin-bottom:6px; }
+  .res-bar { height:100%; border-radius:3px; transition:width 0.6s ease; }
+  .res-bar.cpu { background:var(--blue); }
+  .res-bar.ram { background:var(--orange); }
+  .res-bar.gpu { background:var(--green); }
+  .res-bar.model-mem { background:var(--purple); }
+  .res-val { font-size:0.85rem; font-weight:600; font-variant-numeric:tabular-nums; }
+  .model-info { font-size:0.75rem; color:var(--muted); margin-bottom:16px; display:flex; flex-wrap:wrap; gap:14px; min-height:20px; }
+
   /* 历史列表 */
   .history-title { font-size: 1rem; margin-bottom: 12px; color: var(--muted); }
   .history-list { display: flex; flex-direction: column; gap: 8px; }
@@ -191,7 +271,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .empty { text-align: center; color: var(--muted); padding: 40px; }
   .empty-icon { font-size: 3rem; margin-bottom: 10px; }
 
-  /* 响应式 */
+  /* 资源监控 */
   @media (max-width: 600px) {
     body { padding: 12px; }
     .status-card { padding: 16px; }
@@ -231,6 +311,31 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- 系统资源 -->
+  <div class="resource-grid" id="resourceGrid">
+    <div class="res-card">
+      <div class="res-label">CPU</div>
+      <div class="res-bar-bg"><div class="res-bar cpu" id="cpuBar"></div></div>
+      <div class="res-val" id="cpuVal">-</div>
+    </div>
+    <div class="res-card">
+      <div class="res-label">RAM</div>
+      <div class="res-bar-bg"><div class="res-bar ram" id="ramBar"></div></div>
+      <div class="res-val" id="ramVal">-</div>
+    </div>
+    <div class="res-card">
+      <div class="res-label">模型占用</div>
+      <div class="res-bar-bg"><div class="res-bar model-mem" id="modelMemBar"></div></div>
+      <div class="res-val" id="modelMemVal">-</div>
+    </div>
+    <div class="res-card">
+      <div class="res-label">GPU</div>
+      <div class="res-bar-bg"><div class="res-bar gpu" id="gpuBar"></div></div>
+      <div class="res-val" id="gpuVal">-</div>
+    </div>
+  </div>
+  <div class="model-info" id="modelInfo"></div>
+
   <!-- 历史记录 -->
   <div class="history-title">📋 任务历史</div>
   <div class="history-list" id="historyList">
@@ -241,17 +346,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <script>
 const STATUS_API = '/api/status';
 const HISTORY_API = '/api/history';
+const RESOURCE_API = '/api/resources';
 let lastTaskId = null;
 
 const PHASES = ['init','check','connect','model','running','done'];
 
 async function refresh() {
   try {
-    const [statusRes, historyRes] = await Promise.all([
-      fetch(STATUS_API), fetch(HISTORY_API)
+    const [statusRes, historyRes, resourceRes] = await Promise.all([
+      fetch(STATUS_API), fetch(HISTORY_API), fetch(RESOURCE_API).catch(() => null)
     ]);
     const status = await statusRes.json();
     const history = await historyRes.json();
+    const resources = resourceRes ? await resourceRes.json() : null;
 
     if (!status) return;
     renderStatus(status);
@@ -259,6 +366,7 @@ async function refresh() {
       renderHistory(history);
       lastTaskId = status.taskId;
     }
+    if (resources) renderResources(resources);
   } catch(e) { console.error(e); }
 }
 
@@ -312,7 +420,7 @@ function renderStatus(s) {
 function renderHistory(items) {
   const list = document.getElementById('historyList');
   if (!items || !items.length) {
-    list.innerHTML = '<div class="empty"><div class="empty-icon">📭</div>暂无记录</div>';
+    list.innerHTML = '<div class="empty"><div class="empty-icon">📭</div>' + 'No records yet' + '</div>';
     return;
   }
   list.innerHTML = items.map(h => {
@@ -322,9 +430,47 @@ function renderHistory(items) {
     return '<div class="history-item">' +
       '<span class="prompt" title="' + (h.prompt||'').replace(/"/g,'&quot;') + '">' + shortPrompt + '</span>' +
       '<span class="time">' + time + '&nbsp;</span>' +
-      '<span class="' + (isOk ? 'exit-ok' : 'exit-err') + '">' + (isOk ? '✓' : '✗ ' + h.exitCode) + '</span>' +
+      '<span class="' + (isOk ? 'exit-ok' : 'exit-err') + '">' + (isOk ? 'OK' : 'ERR '+h.exitCode) + '</span>' +
       '</div>';
   }).join('');
+}
+
+function renderResources(r) {
+  // CPU
+  const cpuPct = r.system.cpuPercent || 0;
+  document.getElementById('cpuBar').style.width = cpuPct + '%';
+  document.getElementById('cpuVal').textContent = cpuPct + '%';
+  // RAM
+  const ramPct = r.system.ramPercent || 0;
+  document.getElementById('ramBar').style.width = ramPct + '%';
+  document.getElementById('ramVal').textContent = (r.system.ramUsed||0).toFixed(1) + ' / ' + (r.system.ramTotal||0).toFixed(1) + ' GB';
+  // Model memory
+  let modelSize = '-'; let modelRam = 0;
+  if (r.models && r.models.length > 0) {
+    const m = r.models[0];
+    modelSize = m.size || '-';
+    // Parse size like "11 GB" or "5.2 GB"
+    const sizeMatch = modelSize.match(/([\d.]+)\s*GB/i);
+    if (sizeMatch && r.system.ramTotal) {
+      modelRam = parseFloat(sizeMatch[1]) / r.system.ramTotal * 100;
+    }
+    const cpuGpu = m.processor || '';
+    document.getElementById('gpuBar').style.width = (m.gpuPercent || 0) + '%';
+    document.getElementById('gpuVal').textContent = cpuGpu;
+    document.getElementById('modelMemBar').style.width = Math.min(modelRam, 100) + '%';
+    document.getElementById('modelMemVal').textContent = modelSize;
+    document.getElementById('modelInfo').innerHTML =
+      '<span>📦 ' + m.name + '</span>' +
+      '<span>🆔 ' + m.id + '</span>' +
+      '<span>📐 ctx:' + (m.context || '-') + '</span>' +
+      '<span>⏳ until:' + (m.until || '-') + '</span>';
+  } else {
+    document.getElementById('gpuBar').style.width = '0%';
+    document.getElementById('gpuVal').textContent = 'idle';
+    document.getElementById('modelMemBar').style.width = '0%';
+    document.getElementById('modelMemVal').textContent = 'no model';
+    document.getElementById('modelInfo').innerHTML = '<span>No model loaded</span>';
+  }
 }
 
 // 每秒刷新

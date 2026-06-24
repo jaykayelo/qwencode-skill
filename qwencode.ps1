@@ -1,132 +1,73 @@
-<#
-.SYNOPSIS
-  QwenCode Bridge — Claude 下指令，Qwen Code 执行 + 进度可视化
-#>
-
+<# QwenCode Bridge - Claude thinks, Qwen executes #>
 param(
-    [Parameter(Mandatory=$true, Position=0)]
-    [string]$Prompt,
-
-    [Parameter(Position=1)]
+    [Parameter(Mandatory=$true)][string]$Prompt,
     [string]$Model = "qwen3:8b-fast",
-
-    [Parameter(Position=2)]
     [string]$WorkDir = (Get-Location).Path
 )
+$ErrorActionPreference = "Continue"
+$SD  = "$env:USERPROFILE\.qwencode"
+$SF  = "$SD\status.json"
+$HD  = "$SD\history"
+$TID = "task-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + "-" + (Get-Random -Min 1000 -Max 9999)
+$STA = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+$SW  = [System.Diagnostics.Stopwatch]::StartNew()
+New-Item -ItemType Directory -Force -Path $SD, $HD | Out-Null
 
-$ErrorActionPreference = "Stop"
-$STATUS_DIR = "$env:USERPROFILE\.qwencode"
-$STATUS_FILE = "$STATUS_DIR\status.json"
-$HISTORY_DIR = "$STATUS_DIR\history"
+$PP = $Prompt; if ($Prompt.Length -gt 60) { $PP = $Prompt.Substring(0, 60) + "..." }
 
-# 初始化状态目录
-New-Item -ItemType Directory -Force -Path $STATUS_DIR, $HISTORY_DIR | Out-Null
-
-# 状态写入函数
-function Write-Status {
-    param([string]$Phase, [string]$Message, [int]$Progress)
-    $status = @{
-        taskId     = $TASK_ID
-        phase      = $Phase
-        message    = $Message
-        progress   = $Progress
-        model      = $Model
-        workDir    = $WorkDir
-        prompt     = ($Prompt.Substring(0, [Math]::Min(80, $Prompt.Length)) + "...")
-        startedAt  = $STARTED_AT
-        updatedAt  = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        pid        = $PID
-    } | ConvertTo-Json -Compress
-    $status | Set-Content $STATUS_FILE -Force -Encoding UTF8
+# helper to write status JSON
+filter WriteS($P,$M,$G) {
+    $O = [ordered]@{taskId=$TID;phase=$P;message=$M;progress=$G;model=$Model;workDir=$WorkDir;prompt=$PP;startedAt=$STA;updatedAt=(Get-Date -Format 'HH:mm:ss')}
+    $O | ConvertTo-Json -Compress | Set-Content $SF -Force -Encoding UTF8
 }
 
-function Write-History {
-    param([string]$Result, [int]$ExitCode)
-    $entry = @{
-        taskId    = $TASK_ID
-        prompt    = $Prompt
-        model     = $Model
-        workDir   = $WorkDir
-        startedAt = $STARTED_AT
-        endedAt   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-        exitCode  = $ExitCode
-        result    = ($Result.Substring(0, [Math]::Min(500, $Result.Length)))
-    } | ConvertTo-Json -Compress
-    $entry | Set-Content "$HISTORY_DIR\$TASK_ID.json" -Force -Encoding UTF8
-}
-
-# 任务 ID
-$TASK_ID = "task-$(Get-Date -Format 'yyyyMMdd-HHmmss')-$(Get-Random -Min 1000 -Max 9999)"
-$STARTED_AT = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-$SCRIPT_START = Get-Date
-
-Write-Status -Phase "init" -Message "启动工作流..." -Progress 0
-
-# 依赖检查
-Write-Status -Phase "check" -Message "检查依赖..." -Progress 5
+"init"   | WriteS "Starting..."         2
+"check"  | WriteS "Checking deps..."     8
 if (-not (Get-Command qwen -ErrorAction SilentlyContinue)) {
-    Write-Status -Phase "error" -Message "Qwen Code 未安装" -Progress 100
-    throw "Qwen Code 未安装"
-}
-if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
-    Write-Status -Phase "error" -Message "Ollama 未安装" -Progress 100
-    throw "Ollama 未安装"
+    "error" | WriteS "Qwen Code not found" 100
+    throw "Install: npm install -g @qwen-code/qwen-code"
 }
 
-# 确认 Ollama 在线
-Write-Status -Phase "connect" -Message "连接 Ollama 服务..." -Progress 10
-$ollamaOk = ollama list 2>$null
+"connect" | WriteS "Connecting Ollama..." 15
+$tmp = ollama list 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Write-Status -Phase "connect" -Message "启动 Ollama 服务中..." -Progress 12
+    "connect" | WriteS "Starting Ollama..." 18
     Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden
     Start-Sleep -Seconds 3
 }
 
-# 确认模型就绪
-Write-Status -Phase "model" -Message "加载模型: $Model" -Progress 15
-$models = ollama list 2>&1 | Out-String
-if ($models -notmatch $Model) {
-    Write-Status -Phase "model" -Message "拉取模型: $Model (请耐心等待...)" -Progress 18
-    ollama pull $Model 2>&1 | Out-Null
-}
+"model"   | WriteS "Model: $Model"        22
+"running" | WriteS "Qwen Code running..."  30
 
-# 显示信息
-$box = @"
+Write-Host ""
+Write-Host "  ========================================"
+Write-Host "   Claude -> Qwen Code Bridge"
+Write-Host "  ========================================"
+Write-Host ("   Task : " + $TID)
+Write-Host ("   Model: " + $Model)
+Write-Host ("   Panel: http://localhost:9876")
+Write-Host "  ========================================"
+Write-Host ""
 
-╔══════════════════════════════════════╗
-║  Claude → Qwen Code 工作流         ║
-╠══════════════════════════════════════╣
-║  任务: $TASK_ID
-║  模型: $Model
-║  目录: $WorkDir
-║  仪表盘: http://localhost:9876
-╚══════════════════════════════════════╝
-"@
-Write-Host $box
-
-# 启动执行
-Write-Status -Phase "running" -Message "Qwen Code 执行中..." -Progress 25
 Push-Location $WorkDir
-
 try {
-    $output = & {
-        qwen -y -m $Model -o text $Prompt 2>&1
-    }
+    $raw = qwen -y -m $Model -o text $Prompt 2>&1
+    $ec  = $LASTEXITCODE
+    $SW.Stop()
+    $el  = [math]::Round($SW.Elapsed.TotalSeconds, 1)
 
-    $exitCode = $LASTEXITCODE
-    $elapsed = [math]::Round(((Get-Date) - $SCRIPT_START).TotalSeconds, 1)
-
-    if ($exitCode -eq 0 -and $output) {
-        Write-Status -Phase "done" -Message "执行完成 (${elapsed}s)" -Progress 100
-        Write-Host "`n[qwencode] ✓ 完成 (${elapsed}s)"
-        Write-History -Result ($output -join "`n") -ExitCode 0
-        return $output
+    if ($ec -eq 0) {
+        "done" | WriteS "Done (${el}s)" 100
+        Write-Host ("`n  [qwencode] OK (" + $el + "s)")
+        $H = [ordered]@{taskId=$TID;prompt=$Prompt;model=$Model;workDir=$WorkDir;startedAt=$STA;endedAt=(Get-Date -Format 'HH:mm:ss');exitCode=0;elapsed=$el}
+        $H | ConvertTo-Json -Compress | Set-Content "$HD\$TID.json" -Force -Encoding UTF8
+        return $raw
     } else {
-        Write-Status -Phase "failed" -Message "执行失败 (${elapsed}s)" -Progress 100
-        Write-Host "`n[qwencode] ✗ 失败 (${elapsed}s)"
-        Write-History -Result ($output -join "`n") -ExitCode $exitCode
-        exit 1
+        "failed" | WriteS "Failed (${el}s)" 100
+        Write-Host ("`n  [qwencode] FAIL (exit " + $ec + ")")
+        $H = [ordered]@{taskId=$TID;prompt=$Prompt;model=$Model;workDir=$WorkDir;startedAt=$STA;endedAt=(Get-Date -Format 'HH:mm:ss');exitCode=$ec;elapsed=$el}
+        $H | ConvertTo-Json -Compress | Set-Content "$HD\$TID.json" -Force -Encoding UTF8
+        Write-Host $raw
+        exit $ec
     }
-} finally {
-    Pop-Location
-}
+} finally { Pop-Location }
